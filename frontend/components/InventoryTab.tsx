@@ -206,7 +206,7 @@ export default function InventoryTab() {
                         {isLowStock && (
                           <AlertTriangle
                             className="h-3.5 w-3.5 text-amber-400 flex-shrink-0"
-                            title="Stock bajo"
+                            aria-label="Stock bajo"
                           />
                         )}
                         <span
