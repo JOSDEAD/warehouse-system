@@ -1,0 +1,7 @@
+{
+  "vps_host": "http://your-vps-ip:8000",
+  "ws_path": "/ws",
+  "poll_interval_seconds": 60,
+  "sound_file": "sounds/nuevo_pedido.mp3",
+  "reconnect_delay_seconds": 5
+}
