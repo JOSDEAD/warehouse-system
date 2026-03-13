@@ -42,12 +42,17 @@ class OrderResponse(BaseModel):
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     completed_by: Optional[str] = None
+    checked_items: List[str] = []
     items: List[OrderItemResponse] = []
 
 
 class OrderStatusUpdate(BaseModel):
     status: str = Field(..., pattern="^(in_progress|completed)$")
     completed_by: Optional[str] = None
+
+
+class OrderProgressUpdate(BaseModel):
+    checked_items: List[str]
 
 
 class InventoryItem(BaseModel):

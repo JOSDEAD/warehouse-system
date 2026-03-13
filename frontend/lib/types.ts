@@ -15,6 +15,7 @@ export interface Order {
   created_at: string;
   completed_at: string | null;
   completed_by: string | null;
+  checked_items: string[];
   items: OrderItem[];
 }
 

@@ -75,6 +75,16 @@ export async function createInventoryItem(
   })
 }
 
+export async function updateOrderProgress(
+  id: string,
+  checkedItems: string[]
+): Promise<void> {
+  await fetchJSON<void>(`/orders/${id}/progress`, {
+    method: 'PATCH',
+    body: JSON.stringify({ checked_items: checkedItems }),
+  })
+}
+
 export async function getPendingCount(): Promise<number> {
   const orders = await fetchJSON<Order[]>('/orders?status=pending')
   return orders.length

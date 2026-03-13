@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from app.database import supabase
-from app.models import OrderCreate, OrderResponse, OrderItemResponse, OrderStatusUpdate
+from app.models import OrderCreate, OrderResponse, OrderItemResponse, OrderStatusUpdate, OrderProgressUpdate
 from app.services import notifier
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ def _build_order_response(order: dict, items: list) -> OrderResponse:
         created_at=order.get("created_at"),
         completed_at=order.get("completed_at"),
         completed_by=order.get("completed_by"),
+        checked_items=order.get("checked_items") or [],
         items=item_responses,
     )
 
@@ -231,6 +232,28 @@ async def update_order_status(order_id: str, body: OrderStatusUpdate):
     except Exception as exc:
         logger.error("Error updating order status %s: %s", order_id, exc)
         raise HTTPException(status_code=500, detail="Failed to update order status")
+
+
+@router.patch("/{order_id}/progress", response_model=OrderResponse)
+async def update_order_progress(order_id: str, body: OrderProgressUpdate):
+    """Guarda qué items ya fueron preparados (checklist del bodeguero)."""
+    try:
+        result = supabase.table("orders").select("id").eq("id", order_id).single().execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        supabase.table("orders").update(
+            {"checked_items": body.checked_items}
+        ).eq("id", order_id).execute()
+
+        updated = supabase.table("orders").select("*").eq("id", order_id).single().execute()
+        items_result = supabase.table("order_items").select("*").eq("order_id", order_id).execute()
+        return _build_order_response(updated.data, items_result.data or [])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error updating progress for order %s: %s", order_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to update order progress")
 
 
 @router.delete("/{order_id}")

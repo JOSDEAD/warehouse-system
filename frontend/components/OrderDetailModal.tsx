@@ -16,7 +16,7 @@ import {
   MapPin,
 } from 'lucide-react'
 import { type Order } from '@/lib/types'
-import { updateOrderStatus } from '@/lib/api'
+import { updateOrderStatus, updateOrderProgress } from '@/lib/api'
 import StatusBadge from './StatusBadge'
 import LoadingSpinner from './LoadingSpinner'
 
@@ -44,28 +44,6 @@ function itemKey(orderId: string, zone: string, idx: number, id?: string): strin
   return id ? `${orderId}-${id}` : `${orderId}-${zone}-${idx}`
 }
 
-const LS_PREFIX = 'order-progress-'
-
-function loadProgress(orderId: string): Set<string> {
-  try {
-    const raw = localStorage.getItem(LS_PREFIX + orderId)
-    if (raw) return new Set(JSON.parse(raw) as string[])
-  } catch {}
-  return new Set()
-}
-
-function saveProgress(orderId: string, checked: Set<string>) {
-  try {
-    localStorage.setItem(LS_PREFIX + orderId, JSON.stringify([...checked]))
-  } catch {}
-}
-
-function clearProgress(orderId: string) {
-  try {
-    localStorage.removeItem(LS_PREFIX + orderId)
-  } catch {}
-}
-
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function OrderDetailModal({
@@ -78,14 +56,21 @@ export default function OrderDetailModal({
   const [showCompleteForm, setShowCompleteForm] = useState(false)
   const [bodegueroName, setBodegueroName] = useState('')
 
-  // ── Progreso de preparación (persistido en localStorage) ─────────────────
-  const [checkedItems, setCheckedItems] = useState<Set<string>>(() =>
-    loadProgress(order.id)
+  // ── Progreso de preparación (persistido en Supabase vía API) ─────────────
+  const [checkedItems, setCheckedItems] = useState<Set<string>>(
+    () => new Set(order.checked_items ?? [])
   )
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const persistChecked = useCallback((next: Set<string>) => {
     setCheckedItems(next)
-    saveProgress(order.id, next)
+    // Debounce: espera 600ms sin cambios antes de llamar la API
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      updateOrderProgress(order.id, [...next]).catch(() => {
+        // silencioso — no bloquea la UI
+      })
+    }, 600)
   }, [order.id])
 
   // ── Items agrupados por zona ──────────────────────────────────────────────
@@ -174,7 +159,6 @@ export default function OrderDetailModal({
     setError(null)
     try {
       await updateOrderStatus(order.id, 'completed', bodegueroName.trim())
-      clearProgress(order.id)   // limpiar progreso al completar
       onOrderUpdated()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al completar el pedido')
