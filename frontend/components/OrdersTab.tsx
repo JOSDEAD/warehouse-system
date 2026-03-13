@@ -56,6 +56,7 @@ export default function OrdersTab() {
 
   const filterColorMap: Record<FilterStatus, string> = {
     all: 'bg-indigo-600 text-white border-indigo-600',
+    draft: 'bg-zinc-500/20 text-zinc-400 border-zinc-500/40',
     pending: 'bg-amber-500/20 text-amber-400 border-amber-500/40',
     in_progress: 'bg-blue-500/20 text-blue-400 border-blue-500/40',
     completed: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40',
