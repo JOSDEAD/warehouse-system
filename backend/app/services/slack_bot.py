@@ -19,8 +19,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 import requests
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from app.config import settings
 from app.database import supabase
@@ -30,30 +28,19 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Slack app instance
-# ---------------------------------------------------------------------------
-
-_app = App(
-    token=settings.slack_bot_token,
-    signing_secret=settings.slack_signing_secret,
-)
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _download_slack_file(file_id: str, token: str) -> bytes:
+def _download_slack_file(client: Any, file_id: str) -> bytes:
     """Fetch file info, then download the private URL using the bot token."""
-    # Retrieve file metadata
-    info_resp = _app.client.files_info(file=file_id)
+    info_resp = client.files_info(file=file_id)
     file_info: Dict[str, Any] = info_resp["file"]
 
     url_private: str = file_info.get("url_private_download") or file_info.get("url_private", "")
     if not url_private:
         raise ValueError(f"No download URL found for file {file_id}")
 
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {settings.slack_bot_token}"}
     response = requests.get(url_private, headers=headers, timeout=30)
     response.raise_for_status()
     return response.content
@@ -97,12 +84,8 @@ def _save_order_to_db(parsed: Dict[str, Any], channel_id: str, message_ts: str) 
 
 
 def _broadcast_new_order(order_id: str, client_name: str, proforma_number: str) -> None:
-    """
-    Fire-and-forget broadcast to all connected WebSocket clients.
-    Importing inside the function avoids circular import issues at startup.
-    """
+    """Fire-and-forget broadcast to all connected WebSocket clients."""
     import asyncio
-
     from app.routers.ws import broadcast
 
     message = {
@@ -111,8 +94,6 @@ def _broadcast_new_order(order_id: str, client_name: str, proforma_number: str) 
         "client_name": client_name,
         "proforma_number": proforma_number,
     }
-    # The Slack bot runs in a regular (non-async) thread; we need to schedule
-    # the coroutine on the running event loop.
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -120,86 +101,9 @@ def _broadcast_new_order(order_id: str, client_name: str, proforma_number: str) 
         else:
             loop.run_until_complete(broadcast(message))
     except RuntimeError:
-        # No event loop in this thread — create a new one just for this call.
         asyncio.run(broadcast(message))
     except Exception as exc:
         logger.warning("WebSocket broadcast failed: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Event handlers
-# ---------------------------------------------------------------------------
-
-@_app.event("file_shared")
-def handle_file_shared(event: Dict[str, Any], say: Any, client: Any) -> None:
-    """
-    Called whenever a file is shared to a channel the bot is in.
-    Only processes PDF files; silently ignores everything else.
-    """
-    file_id: str = event.get("file_id", "")
-    channel_id: str = event.get("channel_id", "")
-    message_ts: str = event.get("event_ts", "")
-
-    logger.info("file_shared event: file_id=%s channel=%s", file_id, channel_id)
-
-    try:
-        # Get full file info to check mimetype / name
-        info_resp = client.files_info(file=file_id)
-        file_meta: Dict[str, Any] = info_resp["file"]
-        filename: str = file_meta.get("name", "")
-        mimetype: str = file_meta.get("mimetype", "")
-
-        is_pdf = mimetype == "application/pdf" or filename.lower().endswith(".pdf")
-        if not is_pdf:
-            logger.debug("Ignoring non-PDF file: %s (%s)", filename, mimetype)
-            return
-
-        # Download
-        logger.info("Downloading PDF: %s", filename)
-        pdf_bytes = _download_slack_file(file_id, settings.slack_bot_token)
-
-        # Parse
-        logger.info("Parsing PDF (%d bytes)", len(pdf_bytes))
-        parsed = parse_quote_pdf(pdf_bytes)
-
-        # Persist
-        order_id = _save_order_to_db(parsed, channel_id, message_ts)
-        logger.info("Order saved: id=%s proforma=%s", order_id, parsed["proforma_number"])
-
-        # Notify WebSocket clients (audio daemon etc.)
-        _broadcast_new_order(order_id, parsed["client_name"], parsed["proforma_number"])
-
-        # Confirm in Slack
-        item_count = len(parsed.get("items", []))
-        say(
-            channel=channel_id,
-            text=(
-                f"Pedido #{parsed['proforma_number']} de {parsed['client_name']} recibido. "
-                f"Items extraídos: {item_count}. Bodega fue notificada."
-            ),
-        )
-
-    except Exception as exc:
-        logger.error("Error handling file_shared event: %s", exc, exc_info=True)
-        try:
-            client.chat_postMessage(
-                channel=channel_id,
-                text=(
-                    f"No pude procesar el archivo PDF. "
-                    f"Error: {str(exc)[:200]}"
-                ),
-            )
-        except Exception as slack_err:
-            logger.error("Failed to post error message to Slack: %s", slack_err)
-
-
-@_app.event("message")
-def handle_message_events(event: Dict[str, Any], logger: Any) -> None:
-    """
-    Catch-all for message subtypes so slack_bolt doesn't log unhandled warnings.
-    We only care about file_shared, not generic messages.
-    """
-    pass  # intentionally no-op
 
 
 # ---------------------------------------------------------------------------
@@ -208,15 +112,90 @@ def handle_message_events(event: Dict[str, Any], logger: Any) -> None:
 
 def start_slack_bot() -> None:
     """
-    Start the Slack bot using Socket Mode (no public URL / ngrok needed).
+    Start the Slack bot using Socket Mode (no public URL needed).
     This is a blocking call — run it in a background daemon thread.
+
+    ⚠️  The App is initialized HERE (not at module level) so that a bad
+    Slack token cannot crash FastAPI before it even starts serving requests.
     """
     logger.info("Starting Slack bot in Socket Mode...")
+
     try:
+        # --- lazy import to avoid crashing at module load time ---
+        from slack_bolt import App
+        from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+        app = App(
+            token=settings.slack_bot_token,
+            signing_secret=settings.slack_signing_secret,
+        )
+
+        # ── Event: file shared in a channel ──────────────────────────────
+        @app.event("file_shared")
+        def handle_file_shared(event: Dict[str, Any], say: Any, client: Any) -> None:
+            file_id: str = event.get("file_id", "")
+            channel_id: str = event.get("channel_id", "")
+            message_ts: str = event.get("event_ts", "")
+
+            logger.info("file_shared event: file_id=%s channel=%s", file_id, channel_id)
+
+            try:
+                info_resp = client.files_info(file=file_id)
+                file_meta: Dict[str, Any] = info_resp["file"]
+                filename: str = file_meta.get("name", "")
+                mimetype: str = file_meta.get("mimetype", "")
+
+                is_pdf = mimetype == "application/pdf" or filename.lower().endswith(".pdf")
+                if not is_pdf:
+                    logger.debug("Ignoring non-PDF file: %s (%s)", filename, mimetype)
+                    return
+
+                logger.info("Downloading PDF: %s", filename)
+                pdf_bytes = _download_slack_file(client, file_id)
+
+                logger.info("Parsing PDF (%d bytes)", len(pdf_bytes))
+                parsed = parse_quote_pdf(pdf_bytes)
+
+                order_id = _save_order_to_db(parsed, channel_id, message_ts)
+                logger.info("Order saved: id=%s proforma=%s", order_id, parsed["proforma_number"])
+
+                _broadcast_new_order(order_id, parsed["client_name"], parsed["proforma_number"])
+
+                item_count = len(parsed.get("items", []))
+                say(
+                    channel=channel_id,
+                    text=(
+                        f"✅ Pedido *#{parsed['proforma_number']}* de *{parsed['client_name']}* recibido. "
+                        f"Items extraídos: {item_count}. Bodega fue notificada."
+                    ),
+                )
+
+            except Exception as exc:
+                logger.error("Error handling file_shared: %s", exc, exc_info=True)
+                try:
+                    client.chat_postMessage(
+                        channel=channel_id,
+                        text=f"⚠️ No pude procesar el PDF. Error: {str(exc)[:200]}",
+                    )
+                except Exception as slack_err:
+                    logger.error("Failed to post error message to Slack: %s", slack_err)
+
+        # ── Catch-all for other message subtypes ─────────────────────────
+        @app.event("message")
+        def handle_message_events(event: Dict[str, Any], logger: Any) -> None:
+            pass  # intentional no-op
+
+        # ── Start Socket Mode handler ─────────────────────────────────────
         handler = SocketModeHandler(
-            app=_app,
+            app=app,
             app_token=settings.slack_app_token,
         )
-        handler.start()  # blocks until the bot is stopped
+        handler.start()  # blocks until stopped
+
     except Exception as exc:
-        logger.error("Slack bot crashed: %s", exc, exc_info=True)
+        # Log and exit gracefully — FastAPI will keep running without the bot
+        logger.error(
+            "Slack bot failed to start (FastAPI continues running): %s",
+            exc,
+            exc_info=True,
+        )
