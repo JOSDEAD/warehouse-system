@@ -39,17 +39,18 @@ const CATEGORIES: { id: CategoryId; label: string }[] = [
   { id: 'otros',    label: 'Otros'    },
 ]
 
-const CAT_PATTERNS: Record<Exclude<CategoryId, 'all' | 'otros'>, RegExp> = {
-  leds:     /COB|Tira\s+Led|LED|RGB|Secuencial/i,
-  perfiles: /Perfil/i,
-  fuentes:  /Fuente/i,
-  cerebros: /Cerebro/i,
-}
+// El orden importa: Cerebros va ANTES de LEDs porque "Cerebro Secuencial" contiene "Secuencial"
+const CAT_CHECKS: { id: Exclude<CategoryId, 'all' | 'otros'>; pattern: RegExp }[] = [
+  { id: 'cerebros', pattern: /Cerebro/i },
+  { id: 'leds',     pattern: /COB|Tira\s+Led|LED|RGB|Secuencial/i },
+  { id: 'perfiles', pattern: /Perfil/i },
+  { id: 'fuentes',  pattern: /Fuente/i },
+]
 
 function getCategory(description: string): CategoryId {
   const name = description.split('(')[0]
-  for (const [cat, pattern] of Object.entries(CAT_PATTERNS)) {
-    if (pattern.test(name)) return cat as CategoryId
+  for (const check of CAT_CHECKS) {
+    if (check.pattern.test(name)) return check.id
   }
   return 'otros'
 }
