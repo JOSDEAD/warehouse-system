@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# Cache bust v5 - fix 307 redirect on API routes
-RUN echo "build-v5"
+# Cache bust v6 - add debug parse-pdf endpoint
+RUN echo "build-v6"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import orders, inventory, ws
+from app.routers import orders, inventory, ws, debug
 from app.services.slack_bot import start_slack_bot
 import threading
 import logging
@@ -20,6 +20,7 @@ app.add_middleware(
 app.include_router(orders.router, prefix="/api/orders", tags=["orders"])
 app.include_router(inventory.router, prefix="/api/inventory", tags=["inventory"])
 app.include_router(ws.router, tags=["websocket"])
+app.include_router(debug.router, prefix="/api/debug", tags=["debug"])
 
 
 @app.on_event("startup")
