@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { format, formatDistanceStrict } from 'date-fns'
 import { es } from 'date-fns/locale'
 import {
@@ -26,6 +26,48 @@ interface OrderDetailModalProps {
   onOrderUpdated: () => void
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Separa "Nombre Producto (descripción detalle)" en nombre + detalle */
+function splitDescription(full: string): { name: string; detail: string | null } {
+  const idx = full.indexOf('(')
+  if (idx > 0) {
+    const name = full.slice(0, idx).trim()
+    const detail = full.slice(idx + 1).replace(/\)$/, '').trim()
+    return { name, detail: detail || null }
+  }
+  return { name: full, detail: null }
+}
+
+/** Clave única por item — usa id si existe, si no genera una */
+function itemKey(orderId: string, zone: string, idx: number, id?: string): string {
+  return id ? `${orderId}-${id}` : `${orderId}-${zone}-${idx}`
+}
+
+const LS_PREFIX = 'order-progress-'
+
+function loadProgress(orderId: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(LS_PREFIX + orderId)
+    if (raw) return new Set(JSON.parse(raw) as string[])
+  } catch {}
+  return new Set()
+}
+
+function saveProgress(orderId: string, checked: Set<string>) {
+  try {
+    localStorage.setItem(LS_PREFIX + orderId, JSON.stringify([...checked]))
+  } catch {}
+}
+
+function clearProgress(orderId: string) {
+  try {
+    localStorage.removeItem(LS_PREFIX + orderId)
+  } catch {}
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export default function OrderDetailModal({
   order,
   onClose,
@@ -35,9 +77,18 @@ export default function OrderDetailModal({
   const [error, setError] = useState<string | null>(null)
   const [showCompleteForm, setShowCompleteForm] = useState(false)
   const [bodegueroName, setBodegueroName] = useState('')
-  const [completedZones, setCompletedZones] = useState<Set<string>>(new Set())
 
-  // Agrupar items por zona
+  // ── Progreso de preparación (persistido en localStorage) ─────────────────
+  const [checkedItems, setCheckedItems] = useState<Set<string>>(() =>
+    loadProgress(order.id)
+  )
+
+  const persistChecked = useCallback((next: Set<string>) => {
+    setCheckedItems(next)
+    saveProgress(order.id, next)
+  }, [order.id])
+
+  // ── Items agrupados por zona ──────────────────────────────────────────────
   const itemsByZone = useMemo(() => {
     const map = new Map<string, typeof order.items>()
     for (const item of order.items ?? []) {
@@ -48,14 +99,39 @@ export default function OrderDetailModal({
     return map
   }, [order.items])
 
-  function toggleZone(zone: string) {
-    setCompletedZones(prev => {
-      const next = new Set(prev)
-      if (next.has(zone)) next.delete(zone)
-      else next.add(zone)
-      return next
-    })
+  // ── Zona completada = todos sus items están marcados ─────────────────────
+  function isZoneDone(zone: string): boolean {
+    const items = itemsByZone.get(zone) ?? []
+    if (items.length === 0) return false
+    return items.every((item, idx) => checkedItems.has(itemKey(order.id, zone, idx, item.id)))
   }
+
+  /** Toggle de un item individual */
+  function toggleItem(key: string) {
+    const next = new Set(checkedItems)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    persistChecked(next)
+  }
+
+  /** Click en cabecera de zona: si ya está completa → desmarcar todos; si no → marcar todos */
+  function toggleZone(zone: string) {
+    const items = itemsByZone.get(zone) ?? []
+    const done = isZoneDone(zone)
+    const next = new Set(checkedItems)
+    items.forEach((item, idx) => {
+      const key = itemKey(order.id, zone, idx, item.id)
+      if (done) next.delete(key)
+      else next.add(key)
+    })
+    persistChecked(next)
+  }
+
+  const totalItems = order.items?.length ?? 0
+  const doneItems = checkedItems.size
+  const zonesTotal = itemsByZone.size
+  const zonesDone = Array.from(itemsByZone.keys()).filter(isZoneDone).length
+
   const nameInputRef = useRef<HTMLInputElement>(null)
   const modalRef = useRef<HTMLDivElement>(null)
 
@@ -98,6 +174,7 @@ export default function OrderDetailModal({
     setError(null)
     try {
       await updateOrderStatus(order.id, 'completed', bodegueroName.trim())
+      clearProgress(order.id)   // limpiar progreso al completar
       onOrderUpdated()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al completar el pedido')
@@ -130,9 +207,7 @@ export default function OrderDetailModal({
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop"
       style={{ backgroundColor: 'rgba(0, 0, 0, 0.75)' }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
       role="dialog"
       aria-modal="true"
       aria-label={`Detalle del pedido ${order.proforma_number}`}
@@ -145,9 +220,7 @@ export default function OrderDetailModal({
         <div className="flex items-start justify-between p-6 border-b border-slate-700">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-3 flex-wrap mb-2">
-              <h2 className="text-white text-xl font-bold truncate">
-                {order.client_name}
-              </h2>
+              <h2 className="text-white text-xl font-bold truncate">{order.client_name}</h2>
               <StatusBadge status={order.status} />
             </div>
             <div className="flex items-center gap-4 text-slate-400 text-sm flex-wrap">
@@ -172,70 +245,114 @@ export default function OrderDetailModal({
 
         {/* Items por zona */}
         <div className="flex-1 overflow-y-auto p-6">
+          {/* Sub-header con contadores */}
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <Package className="h-4 w-4 text-indigo-400" />
               <h3 className="text-white font-semibold text-sm uppercase tracking-wide">
-                Artículos ({order.items?.length ?? 0})
+                Artículos ({totalItems})
               </h3>
             </div>
-            {itemsByZone.size > 0 && (
-              <span className="text-slate-500 text-xs">
-                {completedZones.size}/{itemsByZone.size} zonas listas
-              </span>
+            {zonesTotal > 0 && (
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-slate-500">
+                  {doneItems}/{totalItems} artículos
+                </span>
+                <span className={`font-semibold ${zonesDone === zonesTotal ? 'text-emerald-400' : 'text-slate-400'}`}>
+                  {zonesDone}/{zonesTotal} zonas listas
+                </span>
+              </div>
             )}
           </div>
+
+          {/* Barra de progreso */}
+          {totalItems > 0 && (
+            <div className="w-full h-1.5 bg-slate-700 rounded-full mb-4 overflow-hidden">
+              <div
+                className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+                style={{ width: `${(doneItems / totalItems) * 100}%` }}
+              />
+            </div>
+          )}
 
           {itemsByZone.size > 0 ? (
             <div className="space-y-3">
               {Array.from(itemsByZone.entries()).map(([zone, items]) => {
-                const done = completedZones.has(zone)
+                const zoneDone = isZoneDone(zone)
                 return (
                   <div
                     key={zone}
-                    className={`rounded-xl border transition-colors ${
-                      done
+                    className={`rounded-xl border transition-all ${
+                      zoneDone
                         ? 'border-emerald-500/30 bg-emerald-500/5'
                         : 'border-slate-700 bg-slate-900/40'
                     }`}
                   >
-                    {/* Zona header con checkbox */}
+                    {/* Cabecera de zona — click marca/desmarca toda la zona */}
                     <button
                       onClick={() => toggleZone(zone)}
                       className="w-full flex items-center gap-3 px-4 py-3 text-left"
                     >
-                      {/* Checkbox visual */}
                       <div className={`flex-shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${
-                        done
-                          ? 'border-emerald-500 bg-emerald-500'
-                          : 'border-slate-500'
+                        zoneDone ? 'border-emerald-500 bg-emerald-500' : 'border-slate-500'
                       }`}>
-                        {done && <CheckCircle className="h-3.5 w-3.5 text-white" />}
+                        {zoneDone && <CheckCircle className="h-3.5 w-3.5 text-white" />}
                       </div>
-                      <MapPin className={`h-3.5 w-3.5 flex-shrink-0 ${done ? 'text-emerald-400' : 'text-indigo-400'}`} />
-                      <span className={`font-semibold text-sm flex-1 ${done ? 'text-emerald-400 line-through' : 'text-white'}`}>
+                      <MapPin className={`h-3.5 w-3.5 flex-shrink-0 ${zoneDone ? 'text-emerald-400' : 'text-indigo-400'}`} />
+                      <span className={`font-semibold text-sm flex-1 ${zoneDone ? 'text-emerald-400 line-through' : 'text-white'}`}>
                         {zone}
                       </span>
-                      <span className={`text-xs ${done ? 'text-emerald-500' : 'text-slate-500'}`}>
-                        {items.length} {items.length === 1 ? 'artículo' : 'artículos'}
+                      <span className={`text-xs ${zoneDone ? 'text-emerald-500' : 'text-slate-500'}`}>
+                        {items.filter((item, idx) => checkedItems.has(itemKey(order.id, zone, idx, item.id))).length}/{items.length}
                       </span>
                     </button>
 
-                    {/* Lista de items */}
-                    <div className="px-4 pb-3 space-y-2">
-                      {items.map((item, idx) => (
-                        <div
-                          key={item.id || idx}
-                          className={`flex items-start justify-between gap-3 py-2 border-t border-slate-700/40 ${done ? 'opacity-50' : ''}`}
-                        >
-                          <span className={`text-sm flex-1 ${done ? 'line-through text-slate-500' : 'text-slate-200'}`}>
-                            {item.description}
-                          </span>
-                          <span className={`text-sm font-bold flex-shrink-0 tabular-nums ${done ? 'text-slate-500' : 'text-white'}`}>
-                            ×{item.quantity}
-                          </span>
-                        </div>
-                      ))}
+                    {/* Lista de items individuales */}
+                    <div className="px-4 pb-3 space-y-1">
+                      {items.map((item, idx) => {
+                        const key = itemKey(order.id, zone, idx, item.id)
+                        const checked = checkedItems.has(key)
+                        const { name, detail } = splitDescription(item.description)
+                        return (
+                          <button
+                            key={key}
+                            onClick={(e) => { e.stopPropagation(); toggleItem(key) }}
+                            className={`w-full flex items-start gap-3 py-2.5 px-1 border-t border-slate-700/40 text-left group transition-opacity ${
+                              checked ? 'opacity-60' : 'opacity-100'
+                            }`}
+                          >
+                            {/* Checkbox cuadrado por item */}
+                            <div className={`flex-shrink-0 mt-0.5 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
+                              checked
+                                ? 'border-emerald-500 bg-emerald-500'
+                                : 'border-slate-500 group-hover:border-slate-300'
+                            }`}>
+                              {checked && (
+                                <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 10 10" fill="none">
+                                  <path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                                </svg>
+                              )}
+                            </div>
+
+                            {/* Nombre + detalle */}
+                            <div className="flex-1 min-w-0">
+                              <span className={`text-sm font-medium leading-snug ${checked ? 'line-through text-slate-500' : 'text-slate-200'}`}>
+                                {name}
+                              </span>
+                              {detail && (
+                                <span className={`block text-xs mt-0.5 ${checked ? 'text-slate-600' : 'text-slate-400'}`}>
+                                  {detail}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Cantidad */}
+                            <span className={`text-sm font-bold flex-shrink-0 tabular-nums mt-0.5 ${checked ? 'text-slate-500' : 'text-white'}`}>
+                              ×{item.quantity}
+                            </span>
+                          </button>
+                        )
+                      })}
                     </div>
                   </div>
                 )
@@ -248,44 +365,32 @@ export default function OrderDetailModal({
             </div>
           )}
 
-          {/* Completion info for completed orders */}
+          {/* Info de completado */}
           {order.status === 'completed' && (
             <div className="mt-5 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
               <div className="flex items-center gap-2 mb-3">
                 <CheckCircle className="h-4 w-4 text-emerald-400" />
-                <span className="text-emerald-400 font-semibold text-sm">
-                  Pedido Completado
-                </span>
+                <span className="text-emerald-400 font-semibold text-sm">Pedido Completado</span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
                 <div>
-                  <span className="text-slate-400 text-xs block mb-0.5">
-                    Completado por
-                  </span>
+                  <span className="text-slate-400 text-xs block mb-0.5">Completado por</span>
                   <div className="flex items-center gap-1.5 text-white">
                     <User className="h-3.5 w-3.5 text-emerald-400" />
-                    <span className="font-medium">
-                      {order.completed_by || 'No especificado'}
-                    </span>
+                    <span className="font-medium">{order.completed_by || 'No especificado'}</span>
                   </div>
                 </div>
                 {order.completed_at && (
                   <>
                     <div>
-                      <span className="text-slate-400 text-xs block mb-0.5">
-                        Fecha de completado
-                      </span>
+                      <span className="text-slate-400 text-xs block mb-0.5">Fecha de completado</span>
                       <div className="flex items-center gap-1.5 text-white">
                         <Calendar className="h-3.5 w-3.5 text-emerald-400" />
-                        <span className="font-medium">
-                          {formatDate(order.completed_at)}
-                        </span>
+                        <span className="font-medium">{formatDate(order.completed_at)}</span>
                       </div>
                     </div>
                     <div>
-                      <span className="text-slate-400 text-xs block mb-0.5">
-                        Duración
-                      </span>
+                      <span className="text-slate-400 text-xs block mb-0.5">Duración</span>
                       <div className="flex items-center gap-1.5 text-white">
                         <Clock className="h-3.5 w-3.5 text-emerald-400" />
                         <span className="font-medium">{getDuration()}</span>
@@ -321,10 +426,7 @@ export default function OrderDetailModal({
                     onChange={(e) => setBodegueroName(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') handleMarkCompleted()
-                      if (e.key === 'Escape') {
-                        setShowCompleteForm(false)
-                        setBodegueroName('')
-                      }
+                      if (e.key === 'Escape') { setShowCompleteForm(false); setBodegueroName('') }
                     }}
                     placeholder="Ej: Juan García"
                     className="w-full px-4 py-2.5 rounded-lg bg-slate-900 border border-slate-600 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
@@ -332,10 +434,7 @@ export default function OrderDetailModal({
                 </label>
                 <div className="flex gap-3">
                   <button
-                    onClick={() => {
-                      setShowCompleteForm(false)
-                      setBodegueroName('')
-                    }}
+                    onClick={() => { setShowCompleteForm(false); setBodegueroName('') }}
                     className="flex-1 px-4 py-2.5 rounded-lg bg-slate-700 text-slate-300 hover:bg-slate-600 font-medium text-sm transition-colors"
                   >
                     Cancelar
@@ -345,13 +444,8 @@ export default function OrderDetailModal({
                     disabled={isUpdating || !bodegueroName.trim()}
                     className="flex-1 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm transition-colors flex items-center justify-center gap-2"
                   >
-                    {isUpdating ? (
-                      <LoadingSpinner size="sm" />
-                    ) : (
-                      <>
-                        <CheckCircle className="h-4 w-4" />
-                        Confirmar Completado
-                      </>
+                    {isUpdating ? <LoadingSpinner size="sm" /> : (
+                      <><CheckCircle className="h-4 w-4" />Confirmar Completado</>
                     )}
                   </button>
                 </div>
@@ -364,13 +458,8 @@ export default function OrderDetailModal({
                     disabled={isUpdating}
                     className="flex-1 min-w-[160px] px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm transition-colors flex items-center justify-center gap-2"
                   >
-                    {isUpdating ? (
-                      <LoadingSpinner size="sm" />
-                    ) : (
-                      <>
-                        <PlayCircle className="h-4 w-4" />
-                        Marcar como En Proceso
-                      </>
+                    {isUpdating ? <LoadingSpinner size="sm" /> : (
+                      <><PlayCircle className="h-4 w-4" />Marcar como En Proceso</>
                     )}
                   </button>
                 )}
