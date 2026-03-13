@@ -668,6 +668,11 @@ def start_slack_bot() -> None:
             except Exception as exc:
                 logger.error("Error guardando edición del pedido: %s", exc, exc_info=True)
 
+        # ── Ignorar file_shared (Slack lo dispara junto con app_mention) ────
+        @app.event("file_shared")
+        def handle_file_shared(event: Dict, logger: Any) -> None:
+            pass  # procesado vía app_mention; ignorar aquí evita el warning 404
+
         # ── Catch-all para eventos de mensaje que no manejamos ────────────
         @app.event("message")
         def handle_message_events(event: Dict, logger: Any) -> None:

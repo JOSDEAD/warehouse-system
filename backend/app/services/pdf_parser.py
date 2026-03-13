@@ -122,53 +122,107 @@ def _safe_float(value: str) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Client & proforma extraction from raw text
+# Client & proforma extraction — position-based (two-column header aware)
 # ---------------------------------------------------------------------------
+#
+# Alegra PDFs have a TWO-COLUMN header layout:
+#
+#   [Company logo / info   |  LEFT  ] [Cotización No. 3385  |  RIGHT ]
+#   [Client name           |  LEFT  ] [Date / Expiry        |  RIGHT ]
+#   [Cedula / Tel          |  LEFT  ]
+#
+# Left column:  x0 < ~290  → client info
+# Right column: x0 > ~350  → document metadata (number, date)
+#
+# Using full extracted text mixes both columns into one line, causing
+# duplicate words ("Cotización Cotización No. No. 3385 3385").
+# We filter by X position to avoid this.
+# ---------------------------------------------------------------------------
+
+_HEADER_Y_MAX   = 220.0   # All header info is above the column header row
+_CLIENT_X_MAX   = 290.0   # Left column: client info
+_PROFORMA_X_MIN = 340.0   # Right column: document number / dates
+
+
+def _find_proforma_from_words(all_words: List[Dict]) -> str:
+    """
+    Look for the proforma/cotización number in the RIGHT half of the header.
+    This avoids picking up 'proforma' from the Observaciones/Notes section.
+    We look for a purely numeric token near words like 'cotización' or 'no.'
+    """
+    # Collect right-column header words only (page 1)
+    right_words = [
+        w for w in all_words
+        if w.get("top", 9999) <= _HEADER_Y_MAX and w["x0"] >= _PROFORMA_X_MIN
+    ]
+    if not right_words:
+        # Fallback: search full text but require the captured group to be digits
+        return "UNKNOWN"
+
+    rows = _group_words_into_rows(right_words, row_tolerance=3.0)
+    for _, row_words in rows:
+        row_text = " ".join(w["text"] for w in sorted(row_words, key=lambda w: w["x0"]))
+        # Match "Cotización No. 3385", "No. 3385", "3385", etc.
+        # The captured group must be mostly numeric
+        patterns = [
+            r"cotizaci[oó]n\s+(?:no?[°º]?\.?\s*)?(\d[\d\-/]*)",
+            r"n[°º o][°º\.]?\s*(\d[\d\-/]*)",
+            r"\b(\d{3,})\b",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, row_text, re.IGNORECASE)
+            if m:
+                candidate = m.group(1).strip()
+                if re.search(r"\d", candidate):   # must contain at least one digit
+                    return candidate
+    return "UNKNOWN"
+
 
 def _find_proforma_number(text: str) -> str:
     """
-    Look for patterns like:
-      "Cotización 3385", "Proforma N° 2024-001", "Cotización No. 100"
+    Regex fallback over raw text.
+    Only accepts captured groups that contain digits (avoids 'contempla').
     """
     patterns = [
-        r"cotizaci[oó]n\s+(?:n[°º]\.?\s*)?(\d+)",
-        r"proforma\s+(?:n[°º]\.?\s*)?(\w[\w\-/]*)",
-        r"(?:n[°º]|no\.)\s*(\d{2,})",
+        r"cotizaci[oó]n\s+(?:no?[°º]?\.?\s*)?(\d[\d\-/]*)",
+        r"n[°º][°º]?\s*(\d[\d\-/]*)",
+        r"(?:^|\s)(\d{3,})(?:\s|$)",
     ]
     for pattern in patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
+        for line in text.splitlines():
+            m = re.search(pattern, line, re.IGNORECASE)
+            if m:
+                candidate = m.group(1).strip()
+                if re.search(r"\d", candidate):
+                    return candidate
     return "UNKNOWN"
 
 
 def _find_client_name_from_words(all_words: List[Dict]) -> str:
     """
-    In Alegra PDFs the client block is in the header area (y ≈ 120–195).
-    The client name is an ALL-CAPS line that comes before the Cedula / Tel line.
-    Strategy:
-      1. Collect words in the client Y band.
-      2. Group into rows.
-      3. Return the first row that is mostly uppercase and long enough.
+    Extract client name from the LEFT column of the header (x0 < _CLIENT_X_MAX).
+    The client name is an ALL-CAPS line before the Cedula / Tel line.
+    Filtering by X avoids mixing with the cotización number on the right.
     """
-    client_words = [
+    # Only left-column header words from page 1
+    left_words = [
         w for w in all_words
-        if _CLIENT_Y_MIN <= w["top"] <= _CLIENT_Y_MAX
+        if _CLIENT_Y_MIN <= w["top"] <= _CLIENT_Y_MAX and w["x0"] < _CLIENT_X_MAX
     ]
-    if not client_words:
+    if not left_words:
         return "UNKNOWN"
 
-    rows = _group_words_into_rows(client_words, row_tolerance=3.0)
+    rows = _group_words_into_rows(left_words, row_tolerance=3.0)
     for _, row_words in rows:
-        text = " ".join(w["text"] for w in sorted(row_words, key=lambda w: w["x0"]))
-        text = text.strip()
-        # Skip obvious non-names
+        text = " ".join(w["text"] for w in sorted(row_words, key=lambda w: w["x0"])).strip()
         low = text.lower()
-        if any(kw in low for kw in ("cedula", "tel", "correo", "email", "@", "ruc", "nit")):
+        # Skip lines with metadata keywords
+        if any(kw in low for kw in ("cedula", "tel", "correo", "email", "@", "ruc", "nit",
+                                     "cotizaci", "proforma", "fecha", "vence", "direcci")):
             continue
-        # Must look like a proper name (mostly alpha, at least 5 chars)
+        # Must look like a name: mostly alpha, at least 4 chars, no bare digits
         alpha_ratio = sum(c.isalpha() or c == " " for c in text) / max(len(text), 1)
-        if alpha_ratio > 0.7 and len(text) >= 5:
+        if alpha_ratio > 0.75 and len(text) >= 4 and not text.isdigit():
             return text
     return "UNKNOWN"
 
@@ -312,10 +366,13 @@ def parse_quote_pdf(pdf_bytes: bytes) -> Dict[str, Any]:
                 logger.warning("PDF produced no extractable text — posiblemente imagen escaneada")
                 return result
 
-            # ── Proforma number ───────────────────────────────────────────────
-            result["proforma_number"] = _find_proforma_number(full_text)
+            # ── Proforma number: position-based first, regex fallback ─────────
+            proforma = _find_proforma_from_words(all_words)
+            if proforma == "UNKNOWN":
+                proforma = _find_proforma_number(full_text)
+            result["proforma_number"] = proforma
 
-            # ── Client name: try word-position first, then regex fallback ─────
+            # ── Client name: position-based (left column) first ───────────────
             client = _find_client_name_from_words(all_words)
             if client == "UNKNOWN":
                 client = _find_client_from_text(full_text)
