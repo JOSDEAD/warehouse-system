@@ -67,7 +67,7 @@ export default function OrderDetailModal({
     // Debounce: espera 600ms sin cambios antes de llamar la API
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
-      updateOrderProgress(order.id, [...next]).catch(() => {
+      updateOrderProgress(order.id, Array.from(next)).catch(() => {
         // silencioso — no bloquea la UI
       })
     }, 600)
