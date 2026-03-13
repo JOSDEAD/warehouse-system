@@ -113,17 +113,22 @@ def _extract_with_openai(pdf_text: str) -> Dict[str, Any]:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-        response_format={"type": "json_object"},
-        max_completion_tokens=4096,
+        reasoning_effort="low",      # gpt-5-mini es reasoning model; "low" evita agotar tokens
+        max_completion_tokens=16000, # suficiente para razonamiento interno + respuesta
     )
 
-    raw_json = response.choices[0].message.content
-    logger.debug("Respuesta OpenAI: %s", raw_json[:500] if raw_json else "(vacío)")
+    raw_content = response.choices[0].message.content
+    logger.debug("Respuesta OpenAI: %s", raw_content[:500] if raw_content else "(vacío)")
 
-    if not raw_json:
+    if not raw_content:
         raise RuntimeError("OpenAI devolvió respuesta vacía")
 
-    return json.loads(raw_json)
+    # Extraer el bloque JSON aunque venga con texto alrededor
+    json_match = re.search(r"\{.*\}", raw_content, re.DOTALL)
+    if not json_match:
+        raise RuntimeError(f"No se encontró JSON en la respuesta: {raw_content[:200]}")
+
+    return json.loads(json_match.group())
 
 
 # ---------------------------------------------------------------------------
