@@ -1,6 +1,7 @@
 import { type Order, type InventoryItem, type NewInventoryItem } from './types'
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+// Elimina trailing slash y agrega /api prefix
+const BASE_URL = `${(process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '')}/api`
 
 async function fetchJSON<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${BASE_URL}${path}`
@@ -43,7 +44,7 @@ export async function updateOrderStatus(
   const body: Record<string, string> = { status }
   if (completedBy) body.completed_by = completedBy
   await fetchJSON<void>(`/orders/${id}/status`, {
-    method: 'PATCH',
+    method: 'PUT',
     body: JSON.stringify(body),
   })
 }
@@ -60,7 +61,7 @@ export async function updateInventory(
   data: Partial<InventoryItem>
 ): Promise<void> {
   await fetchJSON<void>(`/inventory/${id}`, {
-    method: 'PATCH',
+    method: 'PUT',
     body: JSON.stringify(data),
   })
 }

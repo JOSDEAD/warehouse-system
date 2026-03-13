@@ -201,11 +201,11 @@ async def update_order_status(order_id: str, body: OrderStatusUpdate):
                     {
                         "inventory_id": inv_item["id"],
                         "order_id": order_id,
-                        "sku": sku,
-                        "movement_type": "deduction",
-                        "quantity": qty_to_deduct,
-                        "description": item.get("description", ""),
-                        "created_at": now_iso,
+                        "movement_type": "exit",
+                        "quantity_before": float(inv_item.get("quantity", 0)),
+                        "quantity_change": -qty_to_deduct,
+                        "quantity_after": new_qty,
+                        "note": f"Pedido #{order.get('proforma_number', order_id)}: {item.get('description', '')}",
                     }
                 ).execute()
 
