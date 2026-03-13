@@ -122,32 +122,34 @@ def _summary_blocks(
     ]
 
     # ── Ítems agrupados por zona ───────────────────────────────────────────
-    # Preservar orden de aparición de zonas
+    # Slack permite máx 50 bloques por mensaje.
+    # Estrategia: 1 bloque por zona (header + ítems en el mismo text field).
+    # Presupuesto: 3 bloques fijos (header/info/divider) + 1 actions + N zonas
+    # → Con 45 zonas máx = 49 bloques. Suficiente margen.
     zones: Dict[str, List[Dict]] = {}
     for item in items:
         zone = item.get("zone") or "— Sin zona —"
         zones.setdefault(zone, []).append(item)
 
     for zone_name, zone_items in zones.items():
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*📍 {zone_name}*"},
-        })
-
-        # Agrupar ítems de la zona en un solo bloque de texto para ahorra espacio
-        lines = []
+        lines = [f"*📍 {zone_name}*"]
         for item in zone_items:
             qty = item.get("quantity", 1)
-            # Mostrar cantidad como int si es entero
             qty_str = str(int(qty)) if qty == int(qty) else str(qty)
             unit = item.get("unit", "unidad")
             lines.append(f"  • {item['description']}  ×  *{qty_str}* {unit}")
 
+        # Slack section text máx 3000 chars — truncar si hace falta
+        zone_text = "\n".join(lines)
+        if len(zone_text) > 2900:
+            zone_text = zone_text[:2900] + "\n  _…(truncado)_"
+
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "\n".join(lines)},
+            "text": {"type": "mrkdwn", "text": zone_text},
         })
-        blocks.append({"type": "divider"})
+
+    blocks.append({"type": "divider"})
 
     # ── Botones de acción ─────────────────────────────────────────────────
     if confirmed:

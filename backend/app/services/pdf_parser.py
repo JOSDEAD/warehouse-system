@@ -144,37 +144,40 @@ _CLIENT_X_MAX   = 290.0   # Left column: client info
 _PROFORMA_X_MIN = 340.0   # Right column: document number / dates
 
 
-def _find_proforma_from_words(all_words: List[Dict]) -> str:
+def _find_proforma_from_words(page1_words: List[Dict]) -> str:
     """
-    Look for the proforma/cotización number in the RIGHT half of the header.
-    This avoids picking up 'proforma' from the Observaciones/Notes section.
-    We look for a purely numeric token near words like 'cotización' or 'no.'
+    Look for the proforma/cotización number in the RIGHT half of PAGE 1 header.
+    Strategy:
+      1. Filter to right column (x > _PROFORMA_X_MIN) and header Y band.
+      2. Only match rows that contain 'cotización' — avoids RUC/phone numbers.
+      3. The proforma number is short (typically 3-6 digits), not a RUC/phone.
     """
-    # Collect right-column header words only (page 1)
     right_words = [
-        w for w in all_words
+        w for w in page1_words
         if w.get("top", 9999) <= _HEADER_Y_MAX and w["x0"] >= _PROFORMA_X_MIN
     ]
     if not right_words:
-        # Fallback: search full text but require the captured group to be digits
         return "UNKNOWN"
 
     rows = _group_words_into_rows(right_words, row_tolerance=3.0)
+
+    # Pass 1: rows that explicitly contain "cotización" + number
     for _, row_words in rows:
         row_text = " ".join(w["text"] for w in sorted(row_words, key=lambda w: w["x0"]))
-        # Match "Cotización No. 3385", "No. 3385", "3385", etc.
-        # The captured group must be mostly numeric
-        patterns = [
-            r"cotizaci[oó]n\s+(?:no?[°º]?\.?\s*)?(\d[\d\-/]*)",
-            r"n[°º o][°º\.]?\s*(\d[\d\-/]*)",
-            r"\b(\d{3,})\b",
-        ]
-        for pattern in patterns:
-            m = re.search(pattern, row_text, re.IGNORECASE)
-            if m:
-                candidate = m.group(1).strip()
-                if re.search(r"\d", candidate):   # must contain at least one digit
-                    return candidate
+        m = re.search(
+            r"cotizaci[oó]n\s+(?:no?\.?\s*)?(\d{2,8})",
+            row_text, re.IGNORECASE
+        )
+        if m:
+            return m.group(1).strip()
+
+    # Pass 2: rows that contain "No." + short number (2–8 digits)
+    for _, row_words in rows:
+        row_text = " ".join(w["text"] for w in sorted(row_words, key=lambda w: w["x0"]))
+        m = re.search(r"no\.?\s*(\d{2,8})\b", row_text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+
     return "UNKNOWN"
 
 
@@ -198,15 +201,14 @@ def _find_proforma_number(text: str) -> str:
     return "UNKNOWN"
 
 
-def _find_client_name_from_words(all_words: List[Dict]) -> str:
+def _find_client_name_from_words(page1_words: List[Dict]) -> str:
     """
     Extract client name from the LEFT column of the header (x0 < _CLIENT_X_MAX).
+    Uses PAGE 1 WORDS ONLY to avoid duplicate words from page 2 headers.
     The client name is an ALL-CAPS line before the Cedula / Tel line.
-    Filtering by X avoids mixing with the cotización number on the right.
     """
-    # Only left-column header words from page 1
     left_words = [
-        w for w in all_words
+        w for w in page1_words
         if _CLIENT_Y_MIN <= w["top"] <= _CLIENT_Y_MAX and w["x0"] < _CLIENT_X_MAX
     ]
     if not left_words:
@@ -351,29 +353,31 @@ def parse_quote_pdf(pdf_bytes: bytes) -> Dict[str, Any]:
 
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            # ── Extract full text for header fields ──────────────────────────
+            # ── PAGE 1 words (for header extraction — avoids page-2 duplicates)
+            page1_words: List[Dict] = pdf.pages[0].extract_words(
+                x_tolerance=3, y_tolerance=3
+            ) if pdf.pages else []
+
+            # ── Full text from all pages (for fallback regex only)
             full_text_parts = []
-            all_words: List[Dict] = []
             for page in pdf.pages:
                 t = page.extract_text()
                 if t:
                     full_text_parts.append(t)
-                all_words.extend(page.extract_words(x_tolerance=3, y_tolerance=3))
-
             full_text = "\n".join(full_text_parts)
 
             if not full_text.strip():
                 logger.warning("PDF produced no extractable text — posiblemente imagen escaneada")
                 return result
 
-            # ── Proforma number: position-based first, regex fallback ─────────
-            proforma = _find_proforma_from_words(all_words)
+            # ── Proforma: page-1 right-column, then regex fallback ────────────
+            proforma = _find_proforma_from_words(page1_words)
             if proforma == "UNKNOWN":
                 proforma = _find_proforma_number(full_text)
             result["proforma_number"] = proforma
 
-            # ── Client name: position-based (left column) first ───────────────
-            client = _find_client_name_from_words(all_words)
+            # ── Client: page-1 left-column, then regex fallback ───────────────
+            client = _find_client_name_from_words(page1_words)
             if client == "UNKNOWN":
                 client = _find_client_from_text(full_text)
             result["client_name"] = client

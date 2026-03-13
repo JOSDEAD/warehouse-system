@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# Cache bust v9 - fix parser two-column header + draft status + file_shared handler
-RUN echo "build-v9"
+# Cache bust v10 - page1 words only + proforma fix + 50-block limit
+RUN echo "build-v10"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
