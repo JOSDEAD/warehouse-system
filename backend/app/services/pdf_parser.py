@@ -1,328 +1,187 @@
 """
 pdf_parser.py
 =============
-Parser específico para cotizaciones de Alegra (Luxury Lights).
+Parser de cotizaciones Alegra (Luxury Lights) usando OpenAI GPT-4o-mini.
 
-Estructura conocida del PDF:
-- Las columnas son texto posicionado, NO tablas HTML con bordes.
-  extract_tables() solo captura el cuadro de "Total" al pie.
-- Columnas (coordenadas X aproximadas en puntos):
-    Referencia    :   0 – 102
-    Descripción   : 103 – 335
-    Precio        : 336 – 392
-    Cantidad      : 393 – 448
-    Descuento     : 449 – 528
-    Total         : 529 +
-- La columna "Referencia" (zona) solo aparece en el PRIMER ítem de cada
-  grupo. Los ítems siguientes tienen esa celda vacía y heredan la última
-  referencia vista (zone inheritance).
-- El nombre del cliente aparece en ALL CAPS antes de "Cedula" / "Tel".
-- El número de cotización aparece como "Cotización NNNN" en el encabezado.
+Flujo:
+  1. Extraer texto crudo con pdfplumber
+  2. Enviar texto a GPT-4o-mini con prompt estructurado
+  3. Retornar JSON normalizado con proforma_number, client_name e items
 """
 
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 import pdfplumber
+from openai import OpenAI
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Column X-boundaries  (puntos PDF, ~1/72 pulgada)
-# Ajustados a las coordenadas reales de las cotizaciones de Luxury Lights
+# OpenAI client (lazy)
 # ---------------------------------------------------------------------------
-_COLS: Dict[str, Tuple[float, float]] = {
-    "reference":   (0.0,   102.0),
-    "description": (103.0, 335.0),
-    "price":       (336.0, 392.0),
-    "quantity":    (393.0, 448.0),
-    "discount":    (449.0, 528.0),
-    "total":       (529.0, 9999.0),
+
+_openai_client: OpenAI | None = None
+
+
+def _get_openai_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=settings.openai_api_key)
+    return _openai_client
+
+
+# ---------------------------------------------------------------------------
+# Prompt
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = """Eres un asistente experto en extraer información de cotizaciones (proformas) de iluminación de Luxury Lights generadas por Alegra.
+
+Tu tarea es analizar el texto de una cotización PDF y devolver un JSON con esta estructura EXACTA:
+
+{
+  "proforma_number": "NNNN",
+  "client_name": "NOMBRE DEL CLIENTE",
+  "items": [
+    {
+      "zone": "ZONA O REFERENCIA",
+      "description": "Descripción del producto",
+      "quantity": 2
+    }
+  ]
 }
 
-# Palabras que indican el encabezado de la tabla de ítems
-_HEADER_KEYWORDS = {"referencia", "producto", "servicio", "descripci", "cantidad", "precio"}
+Reglas importantes:
+- proforma_number: es el número de cotización (ej: "3385"). Solo el número, sin "Cotización No." ni texto extra.
+- client_name: nombre completo del cliente. Suele aparecer en mayúsculas en el encabezado. NO incluyas "Cedula", "Tel", "Email" ni datos de la empresa Luxury Lights.
+- items: cada línea de producto en la cotización.
+  - zone: la referencia o zona a la que pertenece el ítem (ej: "SALA", "CUARTO 1", "BAÑO"). Los ítems sin zona explícita heredan la última zona vista en el documento. Si no hay zona, usa "GENERAL".
+  - description: descripción del producto tal como aparece en el PDF.
+  - quantity: número entero o decimal de unidades. Si no aparece claramente, usa 1.
+- Devuelve SOLO el JSON, sin texto adicional ni bloques de código markdown.
+- Si no puedes determinar un campo, usa "DESCONOCIDO" para strings y 1 para quantity.
+"""
 
-# Palabras que indican filas de totales / pie de tabla → parar el parsing
-_FOOTER_KEYWORDS = {"subtotal", "descuento", "iva", "igv", "total", "observaci", "nota", "términos"}
+_USER_PROMPT_TEMPLATE = """Aquí está el texto extraído de la cotización PDF:
 
-# Y máxima del bloque de cliente en el encabezado del PDF (puntos)
-# El cliente aparece entre y≈130 y y≈190 en las cotizaciones de Alegra
-_CLIENT_Y_MAX = 195.0
-_CLIENT_Y_MIN = 120.0
+---
+{pdf_text}
+---
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.lower().strip())
-
-
-def _is_header_row(row_text: str) -> bool:
-    n = _normalize(row_text)
-    return any(kw in n for kw in _HEADER_KEYWORDS)
-
-
-def _is_footer_row(row_text: str) -> bool:
-    n = _normalize(row_text)
-    return any(kw in n for kw in _FOOTER_KEYWORDS)
-
-
-def _col_for_word(x0: float) -> Optional[str]:
-    """Return the column name for a word starting at x0, or None if outside all cols."""
-    for col_name, (x_min, x_max) in _COLS.items():
-        if x_min <= x0 < x_max:
-            return col_name
-    return None
-
-
-def _group_words_into_rows(
-    words: List[Dict], row_tolerance: float = 3.0
-) -> List[Tuple[float, List[Dict]]]:
-    """
-    Group words by vertical position (top).
-    Returns sorted list of (y_bucket, [words]) tuples.
-    """
-    buckets: Dict[float, List[Dict]] = {}
-    for word in words:
-        y = round(word["top"] / row_tolerance) * row_tolerance
-        buckets.setdefault(y, []).append(word)
-    return sorted(buckets.items())
-
-
-def _row_cells(row_words: List[Dict]) -> Dict[str, str]:
-    """
-    Map a list of words to column values using X-position boundaries.
-    Words in the same column are joined with a space.
-    """
-    cols: Dict[str, List[str]] = {c: [] for c in _COLS}
-    for word in sorted(row_words, key=lambda w: w["x0"]):
-        col = _col_for_word(word["x0"])
-        if col:
-            cols[col].append(word["text"])
-    return {c: " ".join(v).strip() for c, v in cols.items()}
-
-
-def _safe_float(value: str) -> Optional[float]:
-    cleaned = re.sub(r"[^\d.,\-]", "", value).replace(",", ".")
-    # Handle "1.234.56" style (thousands dot + decimal dot)
-    parts = cleaned.split(".")
-    if len(parts) > 2:
-        cleaned = "".join(parts[:-1]) + "." + parts[-1]
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
+Extrae la información y devuelve el JSON."""
 
 
 # ---------------------------------------------------------------------------
-# Client & proforma extraction — position-based (two-column header aware)
-# ---------------------------------------------------------------------------
-#
-# Alegra PDFs have a TWO-COLUMN header layout:
-#
-#   [Company logo / info   |  LEFT  ] [Cotización No. 3385  |  RIGHT ]
-#   [Client name           |  LEFT  ] [Date / Expiry        |  RIGHT ]
-#   [Cedula / Tel          |  LEFT  ]
-#
-# Left column:  x0 < ~290  → client info
-# Right column: x0 > ~350  → document metadata (number, date)
-#
-# Using full extracted text mixes both columns into one line, causing
-# duplicate words ("Cotización Cotización No. No. 3385 3385").
-# We filter by X position to avoid this.
+# Text extraction
 # ---------------------------------------------------------------------------
 
-_HEADER_Y_MAX   = 220.0   # All header info is above the column header row
-_CLIENT_X_MAX   = 290.0   # Left column: client info
-_PROFORMA_X_MIN = 340.0   # Right column: document number / dates
+def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """Extrae texto de todas las páginas del PDF usando pdfplumber."""
+    pages_text: List[str] = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                pages_text.append(text)
 
-
-def _find_proforma_from_words(page1_words: List[Dict]) -> str:
-    """
-    Look for the proforma/cotización number in the RIGHT half of PAGE 1 header.
-    Strategy:
-      1. Filter to right column (x > _PROFORMA_X_MIN) and header Y band.
-      2. Only match rows that contain 'cotización' — avoids RUC/phone numbers.
-      3. The proforma number is short (typically 3-6 digits), not a RUC/phone.
-    """
-    right_words = [
-        w for w in page1_words
-        if w.get("top", 9999) <= _HEADER_Y_MAX and w["x0"] >= _PROFORMA_X_MIN
-    ]
-    if not right_words:
-        return "UNKNOWN"
-
-    rows = _group_words_into_rows(right_words, row_tolerance=3.0)
-
-    # Pass 1: rows that explicitly contain "cotización" + number
-    for _, row_words in rows:
-        row_text = " ".join(w["text"] for w in sorted(row_words, key=lambda w: w["x0"]))
-        m = re.search(
-            r"cotizaci[oó]n\s+(?:no?\.?\s*)?(\d{2,8})",
-            row_text, re.IGNORECASE
-        )
-        if m:
-            return m.group(1).strip()
-
-    # Pass 2: rows that contain "No." + short number (2–8 digits)
-    for _, row_words in rows:
-        row_text = " ".join(w["text"] for w in sorted(row_words, key=lambda w: w["x0"]))
-        m = re.search(r"no\.?\s*(\d{2,8})\b", row_text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-
-    return "UNKNOWN"
-
-
-def _find_proforma_number(text: str) -> str:
-    """
-    Regex fallback over raw text.
-    Only accepts captured groups that contain digits (avoids 'contempla').
-    """
-    patterns = [
-        r"cotizaci[oó]n\s+(?:no?[°º]?\.?\s*)?(\d[\d\-/]*)",
-        r"n[°º][°º]?\s*(\d[\d\-/]*)",
-        r"(?:^|\s)(\d{3,})(?:\s|$)",
-    ]
-    for pattern in patterns:
-        for line in text.splitlines():
-            m = re.search(pattern, line, re.IGNORECASE)
-            if m:
-                candidate = m.group(1).strip()
-                if re.search(r"\d", candidate):
-                    return candidate
-    return "UNKNOWN"
-
-
-def _find_client_name_from_words(page1_words: List[Dict]) -> str:
-    """
-    Extract client name from the LEFT column of the header (x0 < _CLIENT_X_MAX).
-    Uses PAGE 1 WORDS ONLY to avoid duplicate words from page 2 headers.
-    The client name is an ALL-CAPS line before the Cedula / Tel line.
-    """
-    left_words = [
-        w for w in page1_words
-        if _CLIENT_Y_MIN <= w["top"] <= _CLIENT_Y_MAX and w["x0"] < _CLIENT_X_MAX
-    ]
-    if not left_words:
-        return "UNKNOWN"
-
-    rows = _group_words_into_rows(left_words, row_tolerance=3.0)
-    for _, row_words in rows:
-        text = " ".join(w["text"] for w in sorted(row_words, key=lambda w: w["x0"])).strip()
-        low = text.lower()
-        # Skip lines with metadata keywords
-        if any(kw in low for kw in ("cedula", "tel", "correo", "email", "@", "ruc", "nit",
-                                     "cotizaci", "proforma", "fecha", "vence", "direcci")):
-            continue
-        # Must look like a name: mostly alpha, at least 4 chars, no bare digits
-        alpha_ratio = sum(c.isalpha() or c == " " for c in text) / max(len(text), 1)
-        if alpha_ratio > 0.75 and len(text) >= 4 and not text.isdigit():
-            return text
-    return "UNKNOWN"
-
-
-def _find_client_from_text(text: str) -> str:
-    """
-    Fallback: regex over raw text for known labels.
-    """
-    patterns = [
-        r"(?:cliente|customer|para|se[ñn]or(?:a)?|sra?\.?)\s*[:\-]?\s*(.+)",
-        r"aten(?:ci[oó]n)?\s*[:\-]?\s*(.+)",
-        r"nombre\s*[:\-]?\s*(.+)",
-    ]
-    for pattern in patterns:
-        for line in text.splitlines():
-            m = re.search(pattern, line, re.IGNORECASE)
-            if m:
-                candidate = m.group(1).strip()
-                if candidate and len(candidate) < 120:
-                    return re.sub(r"[:\-]+$", "", candidate).strip()
-    return "UNKNOWN"
+    full_text = "\n\n--- PÁGINA SIGUIENTE ---\n\n".join(pages_text)
+    return full_text
 
 
 # ---------------------------------------------------------------------------
-# Main item extraction  (position-based, zone-inheritance)
+# OpenAI extraction
 # ---------------------------------------------------------------------------
 
-def _extract_items(pdf: pdfplumber.PDF) -> List[Dict[str, Any]]:
-    """
-    Extract line items from ALL pages using word X-positions.
-    Implements zone inheritance: empty reference cell → use last seen reference.
-    """
+def _extract_with_openai(pdf_text: str) -> Dict[str, Any]:
+    """Envía el texto del PDF a GPT-4o-mini y retorna el JSON parseado."""
+    client = _get_openai_client()
+
+    user_message = _USER_PROMPT_TEMPLATE.format(pdf_text=pdf_text)
+
+    logger.info("Enviando PDF a OpenAI GPT-4o-mini (%d chars)...", len(pdf_text))
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+        max_tokens=4096,
+    )
+
+    raw_json = response.choices[0].message.content
+    logger.debug("Respuesta OpenAI: %s", raw_json[:500] if raw_json else "(vacío)")
+
+    if not raw_json:
+        raise RuntimeError("OpenAI devolvió respuesta vacía")
+
+    return json.loads(raw_json)
+
+
+# ---------------------------------------------------------------------------
+# Normalize & validate output
+# ---------------------------------------------------------------------------
+
+def _normalize_result(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Normaliza y valida la respuesta de OpenAI al formato esperado."""
+
+    proforma = str(raw.get("proforma_number") or "DESCONOCIDO").strip()
+    client = str(raw.get("client_name") or "DESCONOCIDO").strip()
+
+    raw_items = raw.get("items") or []
     items: List[Dict[str, Any]] = []
-    current_zone: str = ""
-    in_items_section = False
 
-    for page_num, page in enumerate(pdf.pages, start=1):
-        words = page.extract_words(keep_blank_chars=False, x_tolerance=3, y_tolerance=3)
-        rows = _group_words_into_rows(words, row_tolerance=2.5)
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
 
-        for y, row_words in rows:
-            row_text = " ".join(w["text"] for w in row_words)
+        description = str(item.get("description") or "").strip()
+        if not description:
+            continue
 
-            # Detect header row
-            if not in_items_section:
-                if _is_header_row(row_text):
-                    in_items_section = True
-                    logger.debug("Page %d: header row found at y=%.1f", page_num, y)
-                continue
+        zone = str(item.get("zone") or "GENERAL").strip()
+        if not zone:
+            zone = "GENERAL"
 
-            # Detect footer / totals block → stop
-            if _is_footer_row(row_text):
-                logger.debug("Page %d: footer row at y=%.1f — stopping", page_num, y)
-                in_items_section = False
-                break  # Stop for this page; next page resets
-
-            cells = _row_cells(row_words)
-            description = cells.get("description", "").strip()
-            if not description:
-                continue  # skip blank rows
-
-            # Zone inheritance
-            ref = cells.get("reference", "").strip()
-            if ref:
-                current_zone = ref
-            # else: keep current_zone from previous row
-
-            # Parse quantity
-            qty_str = cells.get("quantity", "")
-            quantity = _safe_float(qty_str) if qty_str else None
-            if quantity is None:
-                # Try to find a number anywhere in row as fallback
-                for cell_val in cells.values():
-                    q = _safe_float(cell_val)
-                    if q is not None and 0 < q < 10_000:
-                        quantity = q
-                        break
-            if quantity is None:
+        # Normalizar quantity
+        qty_raw = item.get("quantity", 1)
+        try:
+            quantity = float(qty_raw)
+            if quantity <= 0:
+                quantity = 1.0
+        except (TypeError, ValueError):
+            # Intentar extraer número de string
+            match = re.search(r"[\d.,]+", str(qty_raw))
+            if match:
+                try:
+                    quantity = float(match.group().replace(",", "."))
+                except ValueError:
+                    quantity = 1.0
+            else:
                 quantity = 1.0
 
-            items.append({
-                "sku": None,        # Alegra PDFs don't have SKU column
-                "description": description,
-                "quantity": quantity,
-                "unit": "unidad",
-                "zone": current_zone,
-            })
-            logger.debug(
-                "  item: zone=%r desc=%r qty=%s",
-                current_zone, description[:40], quantity
-            )
+        items.append({
+            "sku": None,
+            "description": description,
+            "quantity": quantity,
+            "unit": "unidad",
+            "zone": zone,
+        })
 
-        # After page 1+, the header won't repeat on each page in Alegra PDFs.
-        # Re-enable item parsing at start of continuation pages.
-        if page_num > 1 and not in_items_section:
-            in_items_section = True
-
-    return items
+    return {
+        "proforma_number": proforma,
+        "client_name": client,
+        "items": items,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +190,7 @@ def _extract_items(pdf: pdfplumber.PDF) -> List[Dict[str, Any]]:
 
 def parse_quote_pdf(pdf_bytes: bytes) -> Dict[str, Any]:
     """
-    Parse a Luxury Lights / Alegra PDF cotización.
+    Parsea una cotización PDF de Luxury Lights / Alegra usando GPT-4o-mini.
 
     Returns
     -------
@@ -346,51 +205,31 @@ def parse_quote_pdf(pdf_bytes: bytes) -> Dict[str, Any]:
     }
     """
     result: Dict[str, Any] = {
-        "proforma_number": "UNKNOWN",
-        "client_name": "UNKNOWN",
+        "proforma_number": "DESCONOCIDO",
+        "client_name": "DESCONOCIDO",
         "items": [],
     }
 
     try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            # ── PAGE 1 words (for header extraction — avoids page-2 duplicates)
-            page1_words: List[Dict] = pdf.pages[0].extract_words(
-                x_tolerance=3, y_tolerance=3
-            ) if pdf.pages else []
+        # 1. Extraer texto con pdfplumber
+        pdf_text = _extract_text_from_pdf(pdf_bytes)
 
-            # ── Full text from all pages (for fallback regex only)
-            full_text_parts = []
-            for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    full_text_parts.append(t)
-            full_text = "\n".join(full_text_parts)
+        if not pdf_text.strip():
+            logger.warning("PDF no tiene texto extraíble (posiblemente imagen escaneada)")
+            return result
 
-            if not full_text.strip():
-                logger.warning("PDF produced no extractable text — posiblemente imagen escaneada")
-                return result
+        # 2. Enviar a OpenAI
+        raw = _extract_with_openai(pdf_text)
 
-            # ── Proforma: page-1 right-column, then regex fallback ────────────
-            proforma = _find_proforma_from_words(page1_words)
-            if proforma == "UNKNOWN":
-                proforma = _find_proforma_number(full_text)
-            result["proforma_number"] = proforma
-
-            # ── Client: page-1 left-column, then regex fallback ───────────────
-            client = _find_client_name_from_words(page1_words)
-            if client == "UNKNOWN":
-                client = _find_client_from_text(full_text)
-            result["client_name"] = client
-
-            # ── Line items (position-based with zone inheritance) ─────────────
-            result["items"] = _extract_items(pdf)
+        # 3. Normalizar
+        result = _normalize_result(raw)
 
     except Exception as exc:
-        logger.error("PDF parsing failed: %s", exc, exc_info=True)
-        raise RuntimeError(f"Could not parse PDF: {exc}") from exc
+        logger.error("Error parseando PDF: %s", exc, exc_info=True)
+        raise RuntimeError(f"No se pudo parsear el PDF: {exc}") from exc
 
     logger.info(
-        "Parsed PDF → proforma=%s | client=%s | items=%d",
+        "PDF parseado ✓ → proforma=%s | cliente=%s | items=%d",
         result["proforma_number"],
         result["client_name"],
         len(result["items"]),

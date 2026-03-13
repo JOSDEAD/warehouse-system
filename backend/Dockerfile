@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# Cache bust v10 - page1 words only + proforma fix + 50-block limit
-RUN echo "build-v10"
+# Cache bust v11 - OpenAI GPT-4o-mini PDF parser
+RUN echo "build-v11"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

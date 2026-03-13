@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     slack_notify_channel: str = "#bodega"
     audio_daemon_secret: str = "change-this-secret"
     debug_mode: bool = False
+    openai_api_key: str = ""
 
     class Config:
         env_file = ".env"
