@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# Cache bust v13 - gpt-5-mini Responses API
-RUN echo "build-v13"
+# Cache bust v14 - gpt-5-mini chat completions + max_completion_tokens
+RUN echo "build-v14"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

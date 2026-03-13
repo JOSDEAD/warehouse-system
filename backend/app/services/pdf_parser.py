@@ -100,27 +100,24 @@ def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 def _extract_with_openai(pdf_text: str) -> Dict[str, Any]:
-    """Envía el texto del PDF a gpt-5-mini (Responses API) y retorna el JSON parseado."""
+    """Envía el texto del PDF a gpt-5-mini y retorna el JSON parseado."""
     client = _get_openai_client()
 
     user_message = _USER_PROMPT_TEMPLATE.format(pdf_text=pdf_text)
 
     logger.info("Enviando PDF a OpenAI gpt-5-mini (%d chars)...", len(pdf_text))
 
-    # gpt-5-mini usa la Responses API (no Chat Completions)
-    response = client.responses.create(
+    response = client.chat.completions.create(
         model="gpt-5-mini",
-        input=[
+        messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-        reasoning={"effort": "none"},
-        text={
-            "format": {"type": "json_object"},
-        },
+        response_format={"type": "json_object"},
+        max_completion_tokens=4096,
     )
 
-    raw_json = response.output_text
+    raw_json = response.choices[0].message.content
     logger.debug("Respuesta OpenAI: %s", raw_json[:500] if raw_json else "(vacío)")
 
     if not raw_json:
