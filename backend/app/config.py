@@ -10,9 +10,11 @@ class Settings(BaseSettings):
     slack_signing_secret: str
     slack_notify_channel: str = "#bodega"
     audio_daemon_secret: str = "change-this-secret"
+    debug_mode: bool = False
 
     class Config:
         env_file = ".env"
+        extra = "ignore"  # ignora vars de entorno desconocidas
 
 
 @lru_cache()
