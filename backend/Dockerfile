@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# Cache bust v12 - gpt-5-mini PDF parser
-RUN echo "build-v12"
+# Cache bust v13 - gpt-5-mini Responses API
+RUN echo "build-v13"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
