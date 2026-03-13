@@ -11,14 +11,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
-
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_slack_client = WebClient(token=settings.slack_bot_token)
+
+def _get_slack_client():
+    """Lazy init — evita crash al importar si el token es inválido."""
+    from slack_sdk import WebClient
+    return WebClient(token=settings.slack_bot_token)
 
 
 def _calc_prep_minutes(order: Dict[str, Any]) -> Optional[int]:
@@ -88,7 +89,10 @@ async def send_order_completed(
     )
 
     try:
-        response = _slack_client.chat_postMessage(
+        from slack_sdk.errors import SlackApiError
+
+        client = _get_slack_client()
+        response = client.chat_postMessage(
             channel=settings.slack_notify_channel,
             text=message,
             # Also supply blocks for richer formatting in modern Slack clients
@@ -113,7 +117,7 @@ async def send_order_completed(
             exc.response["error"],
             exc,
         )
-        raise
+        # Don't re-raise — Slack failure must not block order completion
     except Exception as exc:
         logger.error("Unexpected error sending Slack notification: %s", exc, exc_info=True)
-        raise
+        # Don't re-raise — Slack failure must not block order completion

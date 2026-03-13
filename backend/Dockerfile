@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# Cache bust v3 - CORS fix
-RUN echo "build-v3"
+# Cache bust v4 - notifier lazy init fix
+RUN echo "build-v4"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
