@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { format, formatDistanceStrict } from 'date-fns'
 import { es } from 'date-fns/locale'
 import {
@@ -13,6 +13,7 @@ import {
   Package,
   Calendar,
   AlertCircle,
+  MapPin,
 } from 'lucide-react'
 import { type Order } from '@/lib/types'
 import { updateOrderStatus } from '@/lib/api'
@@ -34,6 +35,27 @@ export default function OrderDetailModal({
   const [error, setError] = useState<string | null>(null)
   const [showCompleteForm, setShowCompleteForm] = useState(false)
   const [bodegueroName, setBodegueroName] = useState('')
+  const [completedZones, setCompletedZones] = useState<Set<string>>(new Set())
+
+  // Agrupar items por zona
+  const itemsByZone = useMemo(() => {
+    const map = new Map<string, typeof order.items>()
+    for (const item of order.items ?? []) {
+      const zone = item.zone || 'GENERAL'
+      if (!map.has(zone)) map.set(zone, [])
+      map.get(zone)!.push(item)
+    }
+    return map
+  }, [order.items])
+
+  function toggleZone(zone: string) {
+    setCompletedZones(prev => {
+      const next = new Set(prev)
+      if (next.has(zone)) next.delete(zone)
+      else next.add(zone)
+      return next
+    })
+  }
   const nameInputRef = useRef<HTMLInputElement>(null)
   const modalRef = useRef<HTMLDivElement>(null)
 
@@ -148,60 +170,76 @@ export default function OrderDetailModal({
           </button>
         </div>
 
-        {/* Items table */}
+        {/* Items por zona */}
         <div className="flex-1 overflow-y-auto p-6">
-          <div className="flex items-center gap-2 mb-4">
-            <Package className="h-4 w-4 text-indigo-400" />
-            <h3 className="text-white font-semibold text-sm uppercase tracking-wide">
-              Artículos ({order.items?.length ?? 0})
-            </h3>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Package className="h-4 w-4 text-indigo-400" />
+              <h3 className="text-white font-semibold text-sm uppercase tracking-wide">
+                Artículos ({order.items?.length ?? 0})
+              </h3>
+            </div>
+            {itemsByZone.size > 0 && (
+              <span className="text-slate-500 text-xs">
+                {completedZones.size}/{itemsByZone.size} zonas listas
+              </span>
+            )}
           </div>
 
-          {order.items && order.items.length > 0 ? (
-            <div className="overflow-x-auto rounded-xl border border-slate-700">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-slate-900/60">
-                    <th className="text-left px-4 py-3 text-slate-400 font-medium text-xs uppercase tracking-wide">
-                      SKU
-                    </th>
-                    <th className="text-left px-4 py-3 text-slate-400 font-medium text-xs uppercase tracking-wide">
-                      Descripción
-                    </th>
-                    <th className="text-right px-4 py-3 text-slate-400 font-medium text-xs uppercase tracking-wide">
-                      Cantidad
-                    </th>
-                    <th className="text-left px-4 py-3 text-slate-400 font-medium text-xs uppercase tracking-wide">
-                      Unidad
-                    </th>
-                    <th className="text-left px-4 py-3 text-slate-400 font-medium text-xs uppercase tracking-wide">
-                      Zona
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-700/50">
-                  {order.items.map((item, idx) => (
-                    <tr
-                      key={item.id || idx}
-                      className="table-row-hover transition-colors"
+          {itemsByZone.size > 0 ? (
+            <div className="space-y-3">
+              {Array.from(itemsByZone.entries()).map(([zone, items]) => {
+                const done = completedZones.has(zone)
+                return (
+                  <div
+                    key={zone}
+                    className={`rounded-xl border transition-colors ${
+                      done
+                        ? 'border-emerald-500/30 bg-emerald-500/5'
+                        : 'border-slate-700 bg-slate-900/40'
+                    }`}
+                  >
+                    {/* Zona header con checkbox */}
+                    <button
+                      onClick={() => toggleZone(zone)}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-left"
                     >
-                      <td className="px-4 py-3 font-mono text-indigo-400 text-xs">
-                        {item.sku}
-                      </td>
-                      <td className="px-4 py-3 text-slate-200">{item.description}</td>
-                      <td className="px-4 py-3 text-right text-white font-semibold">
-                        {item.quantity}
-                      </td>
-                      <td className="px-4 py-3 text-slate-300">{item.unit}</td>
-                      <td className="px-4 py-3">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-slate-700 text-slate-300 text-xs font-medium">
-                          {item.zone}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      {/* Checkbox visual */}
+                      <div className={`flex-shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${
+                        done
+                          ? 'border-emerald-500 bg-emerald-500'
+                          : 'border-slate-500'
+                      }`}>
+                        {done && <CheckCircle className="h-3.5 w-3.5 text-white" />}
+                      </div>
+                      <MapPin className={`h-3.5 w-3.5 flex-shrink-0 ${done ? 'text-emerald-400' : 'text-indigo-400'}`} />
+                      <span className={`font-semibold text-sm flex-1 ${done ? 'text-emerald-400 line-through' : 'text-white'}`}>
+                        {zone}
+                      </span>
+                      <span className={`text-xs ${done ? 'text-emerald-500' : 'text-slate-500'}`}>
+                        {items.length} {items.length === 1 ? 'artículo' : 'artículos'}
+                      </span>
+                    </button>
+
+                    {/* Lista de items */}
+                    <div className="px-4 pb-3 space-y-2">
+                      {items.map((item, idx) => (
+                        <div
+                          key={item.id || idx}
+                          className={`flex items-start justify-between gap-3 py-2 border-t border-slate-700/40 ${done ? 'opacity-50' : ''}`}
+                        >
+                          <span className={`text-sm flex-1 ${done ? 'line-through text-slate-500' : 'text-slate-200'}`}>
+                            {item.description}
+                          </span>
+                          <span className={`text-sm font-bold flex-shrink-0 tabular-nums ${done ? 'text-slate-500' : 'text-white'}`}>
+                            ×{item.quantity}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           ) : (
             <div className="text-center py-8 text-slate-400">
