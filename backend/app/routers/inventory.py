@@ -42,7 +42,7 @@ async def get_low_stock():
         raise HTTPException(status_code=500, detail="Failed to fetch low-stock items")
 
 
-@router.get("/", response_model=list[InventoryItem])
+@router.get("", response_model=list[InventoryItem])
 async def list_inventory(
     search: Optional[str] = Query(default=None, description="Search by name, sku, or variety"),
 ):
@@ -83,7 +83,7 @@ async def get_inventory_item(item_id: str):
         raise HTTPException(status_code=500, detail="Failed to fetch inventory item")
 
 
-@router.post("/", response_model=InventoryItem, status_code=201)
+@router.post("", response_model=InventoryItem, status_code=201)
 async def create_inventory_item(body: InventoryCreate):
     """Create a new inventory item."""
     try:

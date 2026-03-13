@@ -60,7 +60,7 @@ async def get_pending_count():
         raise HTTPException(status_code=500, detail="Failed to fetch pending count")
 
 
-@router.get("/", response_model=list[OrderResponse])
+@router.get("", response_model=list[OrderResponse])
 async def list_orders(
     status: Optional[str] = Query(default="all", description="pending | in_progress | completed | all"),
     search: Optional[str] = Query(default=None, description="Search in proforma_number and client_name"),
