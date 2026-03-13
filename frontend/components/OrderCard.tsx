@@ -26,7 +26,8 @@ function timeAgo(dateStr: string): string {
 export default function OrderCard({ order, onOrderUpdated }: OrderCardProps) {
   const [isModalOpen, setIsModalOpen] = useState(false)
 
-  const borderColorMap = {
+  const borderColorMap: Record<string, string> = {
+    draft: 'border-l-zinc-500',
     pending: 'border-l-amber-500',
     in_progress: 'border-l-blue-500',
     completed: 'border-l-emerald-500',
