@@ -12,6 +12,11 @@ const statusConfig: Record<
   OrderStatus,
   { label: string; emoji: string; classes: string }
 > = {
+  draft: {
+    label: 'Borrador',
+    emoji: '⚪',
+    classes: 'bg-zinc-500/10 text-zinc-400 border border-zinc-500/30',
+  },
   pending: {
     label: 'Pendiente',
     emoji: '🟡',
