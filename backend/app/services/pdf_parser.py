@@ -108,7 +108,7 @@ def _extract_with_openai(pdf_text: str) -> Dict[str, Any]:
     logger.info("Enviando PDF a OpenAI GPT-4o-mini (%d chars)...", len(pdf_text))
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5-mini",
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
